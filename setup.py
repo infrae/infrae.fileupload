@@ -35,6 +35,10 @@ setup(name='infrae.fileupload',
       install_requires=[
         'setuptools',
         ],
+      entry_points="""
+      [paste.filter_app_factory]
+      main = infrae.fileupload.upload:make_app
+      """,
       tests_require = tests_require,
       extras_require = {'test': tests_require},
       )
