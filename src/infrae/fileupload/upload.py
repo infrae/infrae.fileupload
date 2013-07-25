@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import time
 
 import cgi
 import fcntl
@@ -38,6 +39,8 @@ class Lock(object):
 
 
 class UploadManager(object):
+    """Manage the upload directory.
+    """
 
     def __init__(self, directory):
         self._directory = directory
@@ -46,7 +49,7 @@ class UploadManager(object):
     def _get_lock(self):
         return Lock(self._lock)
 
-    def _get_upload_file(self, create, identifier, factory):
+    def _get_upload_bucket(self, create, identifier, factory):
         path = os.path.join(self._directory, identifier)
         with self._get_lock():
             if not os.path.isdir(path):
@@ -56,24 +59,26 @@ class UploadManager(object):
                     return None
             return factory(self, identifier, path)
 
-    def create_upload_file(self, identifier, *args):
-        return self._get_upload_file(
+    def create_upload_bucket(self, identifier, *args):
+        return self._get_upload_bucket(
             True,
             identifier,
-            lambda api, identifier, path: UploadingFile(
+            lambda api, identifier, path: UploadFileBucket(
                 api, identifier, path, *args))
 
-    def access_upload_file(self, identifier):
-        return self._get_upload_file(False, identifier, UploadFile)
+    def access_upload_bucket(self, identifier):
+        return self._get_upload_bucket(False, identifier, FileBucket)
 
-    def clear_upload_file(self, identifier):
+    def clear_upload_bucket(self, identifier):
         path = os.path.join(self._directory, identifier)
         with self._get_lock():
             if os.path.isdir(path):
                 shutil.rmtree(path)
 
 
-class UploadFile(object):
+class FileBucket(object):
+    """Give access to a bucket containing uploaded files.
+    """
 
     def __init__(self, api, identifier, directory):
         self._metadata = os.path.join(directory, 'metadata.json')
@@ -113,7 +118,7 @@ class UploadFile(object):
 
     def clean(self):
         # This is called by the middleware if the upload fails.
-        self._api.clear_upload_file(self._identifier)
+        self._api.clear_upload_bucket(self._identifier)
 
     def is_complete(self):
         status = self.get_status()
@@ -122,44 +127,66 @@ class UploadFile(object):
         return False
 
 
-class UploadingFile(UploadFile):
+def open_data(filename, payload=None):
+    """Open a filename and write a payload in it, flush it and return
+    the file object for futher write operaions in it. If the file
+    already exists it will deleted and recreated. This is needed so
+    that if an another process was writing in the file, the content
+    written by this one won't be overriden. This should be called only
+    when the directory is locked.
+    """
+    if os.path.isfile(filename):
+        os.unlink(filename)
+    descriptor = open(filename, 'wb')
+    if payload:
+        descriptor.write(payload)
+    descriptor.flush()
+    return descriptor
+
+
+class UploadFileBucket(FileBucket):
+    """Upload a new file (and manage it) inside a bucket.
+    """
 
     def __init__(self, api, identifier, directory,
                  filename, content_type, content_length):
-        super(UploadingFile, self).__init__(api, identifier, directory)
+        super(UploadFileBucket, self).__init__(api, identifier, directory)
         self._length = content_length
-        with open(self._metadata, 'wb') as stream:
-            stream.write(json.dumps({'filename': filename,
-                                     'content-type': content_type,
-                                     'request-length': content_length}))
-        with open(self._done, 'wb') as stream:
-            stream.write('0')
+        self._metadata_descriptor = open_data(
+            self._metadata,
+            json.dumps({'identifier': identifier,
+                        'filename': filename,
+                        'content-type': content_type,
+                        'request-length': content_length}))
+        self._done_descriptor = open_data(self._done, '0')
+        self._data_descriptor = open_data(self._data)
 
     def progress(self):
         total = 0
-        with open(self._done, 'wb') as done:
-            while True:
-                try:
-                    read = yield
-                except GeneratorExit:
-                    # Reload and save metadata.
-                    status = json.dumps(self.get_status())
-                    with open(self._metadata, 'wb') as stream:
-                        stream.write(status)
-                    raise StopIteration
-                total += read
-                done.seek(0)
-                done.write(str(total))
-                done.flush()
+        while True:
+            try:
+                read = yield
+            except GeneratorExit:
+                # Reload and save metadata.
+                status = json.dumps(self.get_status())
+                self._metadata_descriptor.seek(0)
+                self._metadata_descriptor.write(status)
+                self._metadata_descriptor.close()
+                self._done_descriptor.close()
+                raise StopIteration
+            total += read
+            self._done_descriptor.seek(0)
+            self._done_descriptor.write(str(total))
+            self._done_descriptor.flush()
 
     def write(self):
-        with open(self._data, 'wb') as data:
-            while True:
-                try:
-                    block = yield
-                except GeneratorExit:
-                    raise StopIteration
-                data.write(block)
+        while True:
+            try:
+                block = yield
+            except GeneratorExit:
+                self._data_descriptor.close()
+                raise StopIteration
+            self._data_descriptor.write(block)
 
 BLOCK_SIZE = 16 * 1024 * 1024
 EOL = '\r\n'
@@ -207,7 +234,8 @@ class UploadMiddleware(object):
         request = Request(environ)
         application = self.application
 
-        if request.path_info.endswith('/++rest++silva.upload'):
+        # XXX We need a better test here.
+        if request.path_info.endswith('/upload'):
             identifier = request.GET.get('identifier')
 
             if identifier is None or not VALID_ID.match(identifier):
@@ -260,7 +288,7 @@ class UploadMiddleware(object):
             return exc.HTTPServerError(
                 'Upload request is malformed (missing payload)')
 
-        upload = self.manager.create_upload_file(
+        upload = self.manager.create_upload_bucket(
             identifier,
             headers['content-disposition'][1]['filename'],
             headers['content-type'][0],
@@ -276,6 +304,8 @@ class UploadMiddleware(object):
             line = input_stream.read()
             if line == part_boundary:
                 # Multipart, we don't handle that
+                output_stream.close()
+                track_progress.close()
                 upload.clean()
                 return exc.HTTPServerError(
                     'Upload request is malformed (two fields)')
@@ -292,10 +322,10 @@ class UploadMiddleware(object):
         return request.get_response(self.application)
 
     def status(self, request, identifier):
-        """Handle status information on the upload process of a file
+        """Handle status information on the upload process of a file.
         """
         result = {'missing': True}
-        upload = self.manager.access_upload_file(identifier)
+        upload = self.manager.access_upload_bucket(identifier)
         if upload is not None:
             status = upload.get_status()
             if status is not None:
@@ -308,7 +338,7 @@ class UploadMiddleware(object):
             response.body = request.GET['callback'] + '(' + json.dumps(result) + ')'
         else:
             response.body = json.dumps(result)
-        return result
+        return response
 
 
 def make_app(application, global_conf, directory, max_size=0):
