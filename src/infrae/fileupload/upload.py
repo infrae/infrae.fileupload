@@ -347,7 +347,7 @@ class UploadMiddleware(object):
             upload.clear()
         response = Response()
         response.content_type = 'application/json'
-        response.body = '{success: true}'
+        response.body = '{"success": true}'
         return response
 
     def status(self, request, identifier):
