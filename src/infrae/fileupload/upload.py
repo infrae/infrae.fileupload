@@ -252,7 +252,7 @@ class UploadMiddleware(object):
                 if 'status' in request.GET:
                     application = self.status(request, identifier)
                 elif 'clear' in request.GET:
-                    application = self.status(request, identifier)
+                    application = self.clear(request, identifier)
                 elif (request.method == 'POST' and
                       request.content_type == 'multipart/form-data'):
                     application = self.upload(request, identifier)
