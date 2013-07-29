@@ -113,7 +113,7 @@ class FileBucket(object):
             return self._data
         return None
 
-    def clean(self):
+    def clear(self):
         # This is called by the middleware if the upload fails.
         self._api.clear_upload_bucket(self._identifier)
 
@@ -251,6 +251,8 @@ class UploadMiddleware(object):
             else:
                 if 'status' in request.GET:
                     application = self.status(request, identifier)
+                elif 'clear' in request.GET:
+                    application = self.status(request, identifier)
                 elif (request.method == 'POST' and
                       request.content_type == 'multipart/form-data'):
                     application = self.upload(request, identifier)
@@ -335,6 +337,18 @@ class UploadMiddleware(object):
         request.content_type = 'application/json'
         request.content_length = len(info)
         return request.get_response(self.application)
+
+    def clear(self, request, identifier):
+        """Request an upload. This is called before starting the
+        upload. To be sure the file is missing.
+        """
+        upload = self.manager.access_upload_bucket(identifier)
+        if upload is not None:
+            upload.clear()
+        response = Response()
+        response.content_type = 'application/json'
+        response.body = '{success: true}'
+        return response
 
     def status(self, request, identifier):
         """Handle status information on the upload process of a file.
