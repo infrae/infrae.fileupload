@@ -105,8 +105,6 @@ class FileBucket(object):
                 except:
                     done = 0
                 status['uploaded-length'] = done
-                if done == status['request-length']:
-                    status['upload-finished'] = True
         self._status = status
         return status
 
@@ -160,6 +158,17 @@ class UploadFileBucket(FileBucket):
         self._done_descriptor = open_data(self._done, '0')
         self._data_descriptor = open_data(self._data)
 
+    def metadata(self, finished=False, error=None):
+        status = self.get_status()
+        if finished:
+            status['upload-finished'] = True
+        if error:
+            status['upload-error'] = error
+        self._metadata_descriptor.seek(0)
+        self._metadata_descriptor.write(json.dumps(status))
+        self._metadata_descriptor.flush()
+        self._status = None
+
     def progress(self):
         total = 0
         while True:
@@ -167,11 +176,10 @@ class UploadFileBucket(FileBucket):
                 read = yield
             except GeneratorExit:
                 # Reload and save metadata.
-                status = json.dumps(self.get_status())
-                self._metadata_descriptor.seek(0)
-                self._metadata_descriptor.write(status)
+                self.metadata(finished=(total == self._length))
                 self._metadata_descriptor.close()
                 self._done_descriptor.close()
+                self._status = None
                 raise StopIteration
             total += read
             self._done_descriptor.seek(0)
@@ -253,14 +261,24 @@ class UploadMiddleware(object):
     def upload(self, request, identifier):
         """Handle upload of a file.
         """
+        upload = None
+
+        def fail(error):
+            if upload is None:
+                failed = self.manager.create_upload_bucket(
+                    identifier, '', 'n/a', '0')
+            else:
+                failed = upload
+            failed.metadata(error=error)
+            return exc.HTTPServerError(error)
+
         length = request.content_length
         if self.max_size and int(length) > self.max_size:
-            return exc.HTTPServerError('Upload is too large')
+            return fail('Upload is too large')
 
         _, options = cgi.parse_header(request.headers['content-type'])
         if 'boundary' not in options:
-            return exc.HTTPServerError(
-                'Upload request is malformed (boundary missing)')
+            return fail('Upload request is malformed #1')
 
         part_boundary = '--' + options['boundary'] + EOL
         end_boundary = '--' + options['boundary'] + '--' + EOL
@@ -269,8 +287,7 @@ class UploadMiddleware(object):
         # Read the first marker
         marker = input_stream.read()
         if marker != part_boundary:
-            return exc.HTTPServerError(
-                'Upload request is malformed (invalid construction)')
+            return fail('Upload request is malformed #2')
 
         # Read the headers
         headers = {}
@@ -283,9 +300,9 @@ class UploadMiddleware(object):
         # We should have now the payload
         if ('content-disposition' not in headers or
             'content-type' not in headers or
-            headers['content-disposition'][0] != 'form-data'):
-            return exc.HTTPServerError(
-                'Upload request is malformed (missing payload)')
+            headers['content-disposition'][0] != 'form-data' or
+            not headers['content-disposition'][1].get('filename')):
+            return fail('Upload request is malformed #3')
 
         upload = self.manager.create_upload_bucket(
             identifier,
@@ -303,11 +320,10 @@ class UploadMiddleware(object):
             line = input_stream.read()
             if line == part_boundary:
                 # Multipart, we don't handle that
+                error = fail('Upload request is malformed #4')
                 output_stream.close()
                 track_progress.close()
-                upload.clean()
-                return exc.HTTPServerError(
-                    'Upload request is malformed (two fields)')
+                return error
 
         # We are done uploading
         output_stream.close()
