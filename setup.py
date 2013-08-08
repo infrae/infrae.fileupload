@@ -34,10 +34,13 @@ setup(name='infrae.fileupload',
       zip_safe=False,
       install_requires=[
         'setuptools',
+        'WebOb'
         ],
       entry_points="""
       [paste.filter_app_factory]
-      main = infrae.fileupload.upload:make_app
+      main = infrae.fileupload.middleware:make_filter
+      [paste.app_factory]
+      main = infrae.fileupload.standalone:make_app
       """,
       tests_require = tests_require,
       extras_require = {'test': tests_require},

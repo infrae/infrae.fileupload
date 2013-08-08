@@ -11,9 +11,11 @@ import shutil
 
 from webob import Request, Response, exc
 
-__all__ = ['make_app']
 logger = logging.getLogger('infrae.fileupload')
 VALID_ID = re.compile(r'^[a-zA-Z0-9=-]*$')
+IDENTIFIER_KEY = 'X-Progress-ID'
+BLOCK_SIZE = 16 * 1024 * 1024
+EOL = '\r\n'
 
 
 class Lock(object):
@@ -41,9 +43,14 @@ class UploadManager(object):
     """Manage the upload directory.
     """
 
-    def __init__(self, directory):
+    def __init__(self, directory, upload_url=None):
         self._directory = directory
         self._lock = os.path.join(directory, 'upload.lock')
+        self._upload_url = upload_url
+
+    @property
+    def upload_url(self):
+        return self._upload_url
 
     def _get_lock(self):
         return Lock(self._lock)
@@ -98,13 +105,14 @@ class FileBucket(object):
                     status = data
             except:
                 pass
-        if status is not None and 'uploaded-finished' not in status:
+        if status is not None and 'received' not in status:
             with open(self._done, 'rb') as stream:
                 try:
                     done = int(stream.read())
                 except:
                     done = 0
-                status['uploaded-length'] = done
+                status['received'] = done
+                status['state'] = 'uploading'
         self._status = status
         return status
 
@@ -120,7 +128,7 @@ class FileBucket(object):
     def is_complete(self):
         status = self.get_status()
         if status is not None:
-            return status.get('upload-finished', False)
+            return status.get('state', 'unknown') == 'done'
         return False
 
 
@@ -154,16 +162,18 @@ class UploadFileBucket(FileBucket):
             json.dumps({'identifier': identifier,
                         'filename': filename,
                         'content-type': content_type,
-                        'request-length': content_length}))
+                        'state': 'starting',
+                        'size': content_length}))
         self._done_descriptor = open_data(self._done, '0')
         self._data_descriptor = open_data(self._data)
 
     def metadata(self, finished=False, error=None):
         status = self.get_status()
         if finished:
-            status['upload-finished'] = True
+            status['state'] = 'done'
         if error:
-            status['upload-error'] = error
+            status['state'] = 'error'
+            status['error'] = error
         self._metadata_descriptor.seek(0)
         self._metadata_descriptor.write(json.dumps(status))
         self._metadata_descriptor.flush()
@@ -195,8 +205,6 @@ class UploadFileBucket(FileBucket):
                 raise StopIteration
             self._data_descriptor.write(block)
 
-BLOCK_SIZE = 16 * 1024 * 1024
-EOL = '\r\n'
 
 class Reader(object):
 
@@ -232,30 +240,41 @@ class UploadMiddleware(object):
     file upload progress.
     """
 
-    def __init__(self, application, directory, max_size=None):
+    def __init__(self, application, directory, max_size=None, upload_url=None):
         self.application = application
-        self.manager = UploadManager(directory)
+        self.manager = UploadManager(directory, upload_url=upload_url)
         self.max_size = max_size
 
     def __call__(self, environ, start_response):
-        request = Request(environ)
         application = self.application
 
-        # XXX We need a better test here.
-        if request.path_info.endswith('/upload'):
-            identifier = request.GET.get('identifier')
+        if not self.manager.upload_url:
+            # XXX We need a better test here.
+            request = Request(environ)
+            if request.path_info.endswith('/upload'):
+                identifier = request.GET.get(IDENTIFIER_KEY)
 
-            if identifier is None or not VALID_ID.match(identifier):
-                logger.error('Malformed upload identifier "%s"', identifier)
-                application = exc.HTTPServerError('Malformed upload identifier')
-            else:
-                if 'status' in request.GET:
+                if identifier is None or not VALID_ID.match(identifier):
+                    logger.error('Malformed upload identifier "%s"', identifier)
+                    application = exc.HTTPServerError(
+                        'Malformed upload identifier')
+                else:
+                    if 'status' in request.GET:
+                        application = self.status(request, identifier)
+                    elif 'clear' in request.GET:
+                        application = self.clear(request, identifier)
+                    elif (request.method == 'POST' and
+                          request.content_type == 'multipart/form-data'):
+                        application = self.upload(request, identifier)
+            elif request.path_info.endswith('/upload/status'):
+                identifier = request.GET.get(IDENTIFIER_KEY)
+
+                if identifier is None or not VALID_ID.match(identifier):
+                    logger.error('Malformed upload identifier "%s"', identifier)
+                    application = exc.HTTPServerError(
+                        'Malformed upload identifier')
+                else:
                     application = self.status(request, identifier)
-                elif 'clear' in request.GET:
-                    application = self.clear(request, identifier)
-                elif (request.method == 'POST' and
-                      request.content_type == 'multipart/form-data'):
-                    application = self.upload(request, identifier)
 
         environ['infrae.fileupload.manager'] = self.manager
         return application(environ, start_response)
@@ -347,7 +366,10 @@ class UploadMiddleware(object):
             upload.clear()
         response = Response()
         response.content_type = 'application/json'
-        response.body = '{"success": true}'
+        if 'callback' in request.GET:
+            response.body = str(request.GET['callback']) + '({"success": true})'
+        else:
+            response.body = '{"success": true}'
         return response
 
     def status(self, request, identifier):
@@ -364,13 +386,14 @@ class UploadMiddleware(object):
         response = Response()
         response.content_type = 'application/json'
         if 'callback' in request.GET:
-            response.body = request.GET['callback'] + '(' + json.dumps(result) + ')'
+            response.body = str(request.GET['callback']) + '(' + json.dumps(result) + ')'
         else:
             response.body = json.dumps(result)
         return response
 
 
-def make_app(application, global_conf, directory, max_size=0):
+def make_filter(application, global_conf, directory,
+                max_size=0, upload_url=None):
     """build a FileUpload application
     """
     directory = os.path.normpath(directory)
@@ -381,6 +404,12 @@ def make_app(application, global_conf, directory, max_size=0):
     if max_size:
         # use Mo
         max_size = int(max_size)*1024*1024
-        logger.info('Max upload size: %s' % max_size)
+        logger.info('Maximum upload size: %s' % max_size)
 
-    return UploadMiddleware(application, directory, max_size=max_size)
+    if upload_url:
+        if not upload_url.endswith('/upload'):
+            upload_url += '/upload'
+        logger.info('Uploading to external URL: %s' % upload_url)
+
+    return UploadMiddleware(
+        application, directory, max_size=max_size, upload_url=upload_url)
