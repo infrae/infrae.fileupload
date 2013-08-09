@@ -1,5 +1,5 @@
 
-from webob import Response
+from webob import Response, exc
 from infrae.fileupload.middleware import make_filter
 import json
 
@@ -7,13 +7,16 @@ import json
 class StandaloneUpload(object):
 
     def __call__(self, environ, start_response):
-        status = environ['infrae.fileupload.current'].get_status()
-        application = Response()
-        application.body = """
-            <html>
-                <body data-upload-identifier="%s" data-upload-info="%s">
-                </body>
-            </html>
+        if 'infrae.fileupload.current' not in environ:
+            application = exc.HTTPNotFound('Not uploading anything.')
+        else:
+            status = environ['infrae.fileupload.current'].get_status()
+            application = Response()
+            application.body = """
+    <html>
+        <body data-upload-identifier="%s" data-upload-info="%s">
+        </body>
+    </html>
         """ % (str(status['identifier']), json.dumps(status).replace('"', '\\"'))
         return application(environ, start_response)
 
