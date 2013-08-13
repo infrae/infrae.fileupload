@@ -18,8 +18,17 @@ BLOCK_SIZE = 16 * 1024 * 1024
 
 
 def compare(original, tested=''):
-    """Compare two lines together.
+    """Compare two lines together, paying attention to the different
+    possibilities to end lines.
 
+    >>> compare(None)
+    False
+    >>> compare('\n')
+    True
+    >>> compare('\r\n')
+    True
+    >>> compare('foo\r\n')
+    False
     >>> compare(None, 'foo')
     False
     >>> compare('foo', 'bar')
@@ -34,7 +43,7 @@ def compare(original, tested=''):
     False
     """
     if original and original.startswith(tested):
-        if original[len(tested):] in ('\n', '\r\n'):
+        if tested[len(original):] in ('', '\r', '\n', '\r\n'):
             return True
     return False
 
@@ -255,6 +264,8 @@ class Reader(object):
         data = ''
         need_more = True
         while need_more:
+            # It is possible we didn't get a full line, and wsgi.input
+            # is not blocking.
             max_size = min(BLOCK_SIZE, self._to_read)
             if max_size:
                 data += self._stream.readline(max_size)
@@ -343,7 +354,7 @@ class UploadMiddleware(object):
         # Read the headers
         headers = {}
         line = input_stream.read(line=True)
-        while compare(line):
+        while not compare(line):
             name, payload = line.split(':', 1)
             headers[name.lower().strip()] = cgi.parse_header(payload)
             line = input_stream.read(line=True)
@@ -370,7 +381,7 @@ class UploadMiddleware(object):
         request.environ['infrae.fileupload.current'] = upload
         line = None
         output_stream = upload.write()
-        while compare(line, end_boundary):
+        while not compare(line, end_boundary):
             output_stream.send(line)
             line = input_stream.read()
             if compare(line, part_boundary):
