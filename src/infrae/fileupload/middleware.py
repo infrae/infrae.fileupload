@@ -251,13 +251,18 @@ class Reader(object):
         for notifier in self._notifies:
             notifier(read)
 
-    def read(self):
-        max_size = BLOCK_SIZE if BLOCK_SIZE < self._to_read else self._to_read
-        if max_size:
-            data = self._stream.readline(max_size)
-            self.notify(len(data))
-            return data
-        return None
+    def read(self, line=False):
+        data = ''
+        need_more = True
+        while need_more:
+            max_size = min(BLOCK_SIZE, self._to_read)
+            if max_size:
+                data += self._stream.readline(max_size)
+                self.notify(len(data))
+                need_more = line and data[-1] != '\n'
+            else:
+                need_more = False
+        return data or None
 
 
 class UploadMiddleware(object):
@@ -331,17 +336,17 @@ class UploadMiddleware(object):
 
         input_stream = Reader(request.environ['wsgi.input'], length)
         # Read the first marker
-        marker = input_stream.read()
+        marker = input_stream.read(line=True)
         if marker.strip() != part_boundary:
             return fail('Upload request is malformed #2')
 
         # Read the headers
         headers = {}
-        line = input_stream.read()
+        line = input_stream.read(line=True)
         while compare(line):
             name, payload = line.split(':', 1)
             headers[name.lower().strip()] = cgi.parse_header(payload)
-            line = input_stream.read()
+            line = input_stream.read(line=True)
 
         # We should have now the payload
         if ('content-disposition' not in headers or
