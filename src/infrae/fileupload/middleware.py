@@ -23,11 +23,11 @@ def compare(original, tested=''):
 
     >>> compare(None)
     False
-    >>> compare('\n')
+    >>> compare('\\n')
     True
-    >>> compare('\r\n')
+    >>> compare('\\r\\n')
     True
-    >>> compare('foo\r\n')
+    >>> compare('foo\\r\\n')
     False
     >>> compare(None, 'foo')
     False
@@ -43,7 +43,7 @@ def compare(original, tested=''):
     False
     """
     if original and original.startswith(tested):
-        if tested[len(original):] in ('', '\r', '\n', '\r\n'):
+        if original[len(tested):] in ('', '\r', '\n', '\r\n'):
             return True
     return False
 
