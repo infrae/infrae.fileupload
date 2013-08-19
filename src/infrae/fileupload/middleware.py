@@ -408,7 +408,7 @@ class UploadMiddleware(object):
             if upload is None:
                 upload = self.manager.create_upload_bucket(
                     identifier, '', 'n/a', '0')
-            upload.metadata(error=error)
+            upload.metadata(error=error.msg)
             if output_stream is not None:
                 output_stream.close()
             if track_progress is not None:
