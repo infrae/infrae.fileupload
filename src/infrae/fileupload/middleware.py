@@ -388,7 +388,13 @@ class UploadMiddleware(object):
         output_stream = upload.write()
         while not compare(line, end_boundary):
             output_stream.send(line)
-            line = input_stream.read()
+            try:
+                line = input_stream.read()
+            except IOError:
+                error = fail('Network error while reading uploading')
+                output_stream.close()
+                track_progress.close()
+                return error
             if compare(line, part_boundary):
                 # Multipart, we don't handle that
                 error = fail('Upload request is malformed #4')
