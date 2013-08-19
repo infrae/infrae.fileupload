@@ -48,8 +48,22 @@ def compare(original, tested=''):
     return False
 
 
-class LockError(ValueError):
-    pass
+class UploadError(ValueError):
+    msg = 'Unknown upload error'
+
+
+class RequestError(UploadError):
+
+    def __init__(self, msg):
+        self.msg = msg
+
+
+class NetworkError(UploadError):
+    msg = 'Network error, cannot read upload'
+
+
+class UploadDirectoryError(UploadError):
+    msg = 'Server configuration error, upload directory is missing'
 
 
 class Lock(object):
@@ -65,7 +79,7 @@ class Lock(object):
             self._opened = open(self._filename, 'wb')
             fcntl.flock(self._opened, fcntl.LOCK_EX)
         except IOError:
-            raise LockError('Cannot lock upload directory')
+            raise UploadDirectoryError()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         fcntl.flock(self._opened, fcntl.LOCK_UN)
@@ -268,7 +282,10 @@ class Reader(object):
             # is not blocking.
             max_size = min(BLOCK_SIZE, self._to_read)
             if max_size:
-                data += self._stream.readline(max_size)
+                try:
+                    data += self._stream.readline(max_size)
+                except IOError:
+                    raise NetworkError()
                 self.notify(len(data))
                 need_more = line and data[-1] != '\n'
             else:
@@ -324,88 +341,79 @@ class UploadMiddleware(object):
         """Handle upload of a file.
         """
         upload = None
+        output_stream = None
+        track_progress = None
         logger.debug('%s: New upload', identifier)
 
-        def fail(error):
-            if upload is None:
-                failed = self.manager.create_upload_bucket(
-                    identifier, '', 'n/a', '0')
-            else:
-                failed = upload
-            failed.metadata(error=error)
-            return exc.HTTPServerError(error)
-
-        length = request.content_length
-        if self.max_size and int(length) > self.max_size:
-            return fail('Upload is too large')
-
-        logger.debug('%s: Size checked', identifier)
-        _, options = cgi.parse_header(request.headers['content-type'])
-        if 'boundary' not in options:
-            return fail('Upload request is malformed '
-                        '(protocol error)')
-
-        part_boundary = '--' + options['boundary']
-        end_boundary = '--' + options['boundary'] + '--'
-
-        logger.debug('%s: Content type boundary checked', identifier)
-        input_stream = Reader(request.environ['wsgi.input'], length)
-        # Read the first marker
-        marker = input_stream.read(line=True)
-        if marker.strip() != part_boundary:
-            return fail('Upload request is malformed '
-                        '(boundary error)')
-
-        # Read the headers
-        headers = {}
-        line = input_stream.read(line=True)
-        while not compare(line):
-            name, payload = line.split(':', 1)
-            headers[name.lower().strip()] = cgi.parse_header(payload)
-            line = input_stream.read(line=True)
-
-        # We should have now the payload
-        if ('content-disposition' not in headers or
-            'content-type' not in headers or
-            headers['content-disposition'][0] != 'form-data' or
-            not headers['content-disposition'][1].get('filename')):
-            return fail('Upload request is malformed '
-                        '(request is not a file upload)')
-
-        logger.debug('%s: Upload header checked', identifier)
         try:
+            length = request.content_length
+            if self.max_size and int(length) > self.max_size:
+                raise RequestError('Upload is too large')
+
+            logger.debug('%s: Size checked', identifier)
+            _, options = cgi.parse_header(request.headers['content-type'])
+            if 'boundary' not in options:
+                raise RequestError('Upload request is malformed '
+                                   '(protocol error)')
+
+            part_boundary = '--' + options['boundary']
+            end_boundary = '--' + options['boundary'] + '--'
+
+            logger.debug('%s: Content type boundary checked', identifier)
+            input_stream = Reader(request.environ['wsgi.input'], length)
+            # Read the first marker
+            marker = input_stream.read(line=True)
+            if marker.strip() != part_boundary:
+                raise RequestError('Upload request is malformed '
+                                   '(boundary error)')
+
+            # Read the headers
+            headers = {}
+            line = input_stream.read(line=True)
+            while not compare(line):
+                name, payload = line.split(':', 1)
+                headers[name.lower().strip()] = cgi.parse_header(payload)
+                line = input_stream.read(line=True)
+
+            # We should have now the payload
+            if ('content-disposition' not in headers or
+                'content-type' not in headers or
+                headers['content-disposition'][0] != 'form-data' or
+                not headers['content-disposition'][1].get('filename')):
+                raise RequestError('Upload request is malformed '
+                                   '(request is not a file upload)')
+            logger.debug('%s: Upload header checked', identifier)
+
             upload = self.manager.create_upload_bucket(
                 identifier,
                 headers['content-disposition'][1]['filename'],
                 headers['content-type'][0],
                 length)
-        except LockError:
-            return fail('Configuration error on upload server, '
-                        'upload directory missing')
-        logger.debug('%s: Upload started', identifier)
+            logger.debug('%s: Upload started', identifier)
 
-        track_progress = upload.progress()
-        track_progress.send(None)
-        input_stream.subscribe(track_progress.send)
-        request.environ['infrae.fileupload.current'] = upload
-        line = None
-        output_stream = upload.write()
-        while not compare(line, end_boundary):
-            output_stream.send(line)
-            try:
+            track_progress = upload.progress()
+            track_progress.send(None)
+            input_stream.subscribe(track_progress.send)
+            request.environ['infrae.fileupload.current'] = upload
+            line = None
+            output_stream = upload.write()
+            while not compare(line, end_boundary):
+                output_stream.send(line)
                 line = input_stream.read()
-            except IOError:
-                error = fail('Network error while reading data')
+                if compare(line, part_boundary):
+                    # Multipart, we don't handle that
+                    raise RequestError('Upload request is malformed '
+                                       '(contains more than one request)')
+        except UploadError as error:
+            if upload is None:
+                upload = self.manager.create_upload_bucket(
+                    identifier, '', 'n/a', '0')
+            upload.metadata(error=error)
+            if output_stream is not None:
                 output_stream.close()
+            if track_progress is not None:
                 track_progress.close()
-                return error
-            if compare(line, part_boundary):
-                # Multipart, we don't handle that
-                error = fail('Upload request is malformed '
-                             '(contains more than one request)')
-                output_stream.close()
-                track_progress.close()
-                return error
+            return exc.HTTPServerError(error.msg)
 
         # We are done uploading
         output_stream.close()
@@ -428,8 +436,8 @@ class UploadMiddleware(object):
             upload = self.manager.access_upload_bucket(identifier)
             if upload is not None:
                 upload.clear()
-        except LockError:
-            result = '{"success": false, "error": "Upload server error #1"}'
+        except UploadError:
+            result = '{"success": false, "error": "Upload server error"}'
         else:
             result = '{"success": true}'
         response = Response()
@@ -451,8 +459,8 @@ class UploadMiddleware(object):
                 status = upload.get_status()
                 if status is not None:
                     result = status
-        except LockError:
-            result = {'state': 'error', 'error': 'Upload server error #1'}
+        except UploadError as error:
+            result = {'state': 'error', 'error': error.msg}
 
         response = Response()
         response.content_type = 'application/json'
