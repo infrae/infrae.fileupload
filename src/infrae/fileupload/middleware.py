@@ -441,10 +441,11 @@ class UploadMiddleware(object):
         else:
             result = '{"success": true}'
         response = Response()
-        response.content_type = 'application/json'
         if 'callback' in request.GET:
+            response.content_type = 'application/javascript'
             response.body = str(request.GET['callback']) + '(' + result + ')'
         else:
+            response.content_type = 'application/json'
             response.body = result
         return response
 
@@ -463,10 +464,11 @@ class UploadMiddleware(object):
             result = {'state': 'error', 'error': error.msg}
 
         response = Response()
-        response.content_type = 'application/json'
         if 'callback' in request.GET:
+            response.content_type = 'application/javascript'
             response.body = str(request.GET['callback']) + '(' + json.dumps(result) + ')'
         else:
+            response.content_type = 'application/json'
             response.body = json.dumps(result)
         return response
 
