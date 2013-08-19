@@ -342,7 +342,8 @@ class UploadMiddleware(object):
         logger.debug('%s: Size checked', identifier)
         _, options = cgi.parse_header(request.headers['content-type'])
         if 'boundary' not in options:
-            return fail('Upload request is malformed #1')
+            return fail('Upload request is malformed '
+                        '(protocol error)')
 
         part_boundary = '--' + options['boundary']
         end_boundary = '--' + options['boundary'] + '--'
@@ -352,7 +353,8 @@ class UploadMiddleware(object):
         # Read the first marker
         marker = input_stream.read(line=True)
         if marker.strip() != part_boundary:
-            return fail('Upload request is malformed #2')
+            return fail('Upload request is malformed '
+                        '(boundary error)')
 
         # Read the headers
         headers = {}
@@ -367,7 +369,8 @@ class UploadMiddleware(object):
             'content-type' not in headers or
             headers['content-disposition'][0] != 'form-data' or
             not headers['content-disposition'][1].get('filename')):
-            return fail('Upload request is malformed #3')
+            return fail('Upload request is malformed '
+                        '(request is not a file upload)')
 
         logger.debug('%s: Upload header checked', identifier)
         try:
@@ -377,7 +380,8 @@ class UploadMiddleware(object):
                 headers['content-type'][0],
                 length)
         except LockError:
-            return fail('Upload server error #1')
+            return fail('Configuration error on upload server, '
+                        'upload directory missing')
         logger.debug('%s: Upload started', identifier)
 
         track_progress = upload.progress()
@@ -391,13 +395,14 @@ class UploadMiddleware(object):
             try:
                 line = input_stream.read()
             except IOError:
-                error = fail('Network error while reading uploading')
+                error = fail('Network error while reading data')
                 output_stream.close()
                 track_progress.close()
                 return error
             if compare(line, part_boundary):
                 # Multipart, we don't handle that
-                error = fail('Upload request is malformed #4')
+                error = fail('Upload request is malformed '
+                             '(contains more than one request)')
                 output_stream.close()
                 track_progress.close()
                 return error
