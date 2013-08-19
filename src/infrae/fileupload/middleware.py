@@ -324,6 +324,7 @@ class UploadMiddleware(object):
         """Handle upload of a file.
         """
         upload = None
+        logger.debug('%s: New upload', identifier)
 
         def fail(error):
             if upload is None:
@@ -338,6 +339,7 @@ class UploadMiddleware(object):
         if self.max_size and int(length) > self.max_size:
             return fail('Upload is too large')
 
+        logger.debug('%s: Size checked', identifier)
         _, options = cgi.parse_header(request.headers['content-type'])
         if 'boundary' not in options:
             return fail('Upload request is malformed #1')
@@ -345,6 +347,7 @@ class UploadMiddleware(object):
         part_boundary = '--' + options['boundary']
         end_boundary = '--' + options['boundary'] + '--'
 
+        logger.debug('%s: Content type boundary checked', identifier)
         input_stream = Reader(request.environ['wsgi.input'], length)
         # Read the first marker
         marker = input_stream.read(line=True)
@@ -366,6 +369,7 @@ class UploadMiddleware(object):
             not headers['content-disposition'][1].get('filename')):
             return fail('Upload request is malformed #3')
 
+        logger.debug('%s: Upload header checked', identifier)
         try:
             upload = self.manager.create_upload_bucket(
                 identifier,
@@ -374,6 +378,7 @@ class UploadMiddleware(object):
                 length)
         except LockError:
             return fail('Upload server error #1')
+        logger.debug('%s: Upload started', identifier)
 
         track_progress = upload.progress()
         track_progress.send(None)
@@ -394,6 +399,7 @@ class UploadMiddleware(object):
         # We are done uploading
         output_stream.close()
         track_progress.close()
+        logger.debug('%s: Upload done, file closed', identifier)
 
         # Get the response from the application
         info = json.dumps(upload.get_status())
@@ -406,6 +412,7 @@ class UploadMiddleware(object):
         """Request an upload. This is called before starting the
         upload. To be sure the file is missing.
         """
+        logger.debug('%s: Clear upload', identifier)
         try:
             upload = self.manager.access_upload_bucket(identifier)
             if upload is not None:
@@ -425,6 +432,7 @@ class UploadMiddleware(object):
     def status(self, request, identifier):
         """Handle status information on the upload process of a file.
         """
+        logger.debug('%s: Status upload', identifier)
         result = {'state': 'starting'}
         try:
             upload = self.manager.access_upload_bucket(identifier)
@@ -435,7 +443,6 @@ class UploadMiddleware(object):
         except LockError:
             result = {'state': 'error', 'error': 'Upload server error #1'}
 
-        logger.info('%s: %s', identifier, result)
         response = Response()
         response.content_type = 'application/json'
         if 'callback' in request.GET:
