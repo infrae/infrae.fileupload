@@ -251,7 +251,10 @@ class UploadFileBucket(FileBucket):
             except GeneratorExit:
                 self._data_descriptor.close()
                 raise StopIteration
-            self._data_descriptor.write(block)
+            if isinstance(block, str):
+                self._data_descriptor.write(block)
+            else:
+                logger.error('Received invalid data to write: %r', block)
 
 
 class Reader(object):
