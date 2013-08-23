@@ -2,17 +2,19 @@
 
 import cgi
 import fcntl
+import hmac
 import io
 import json
 import logging
 import os
 import re
 import shutil
+import uuid
 
 from webob import Request, Response, exc
 
 logger = logging.getLogger('infrae.fileupload')
-VALID_ID = re.compile(r'^[a-zA-Z0-9=-]*$')
+VALID_ID = re.compile(r'^[a-zA-Z0-9:-]*$')
 IDENTIFIER_KEY = 'X-Progress-ID'
 BLOCK_SIZE = 16 * 1024 * 1024
 
@@ -50,6 +52,10 @@ def compare(original, tested=''):
 
 class UploadError(ValueError):
     msg = 'Unknown upload error'
+
+
+class InvalidIdentifierError(UploadError):
+    msg = 'Provided upload identifier was invalid'
 
 
 class RequestError(UploadError):
@@ -91,7 +97,8 @@ class UploadManager(object):
     """Manage the upload directory.
     """
 
-    def __init__(self, directory, upload_url=None):
+    def __init__(self, directory, upload_url=None, upload_key=None):
+        self._key = upload_key
         self._directory = directory
         self._lock = os.path.join(directory, 'upload.lock')
         self._upload_url = upload_url
@@ -113,7 +120,36 @@ class UploadManager(object):
                     return None
             return factory(self, identifier, path)
 
+    def _check_identifier(self, identifier):
+        if identifier is None and not VALID_ID.match(identifier):
+            return None
+        if ':' in identifier:
+            identifier, user_key = identifier.split(':', 1)
+            if self._key:
+                expected_key = hmac.new(self._key, identifier).hexdigest()
+                if user_key == expected_key:
+                    return identifier
+            # There was a key but non was configured.
+            return None
+        else:
+            if self._key:
+                # Key was provided but not present in user input.
+                return None
+        return identifier
+
+    def verify_identifier(self, identifier):
+        return self._check_identifier(identifier) != None
+
+    def create_identifier(self):
+        identifier = str(uuid.uuid1())
+        if self._key:
+            identifier += ':' + hmac.new(self._key, identifier).hexdigest()
+        return identifier
+
     def create_upload_bucket(self, identifier, *args):
+        identifier = self._check_identifier(identifier)
+        if identifier is None:
+            raise InvalidIdentifierError()
         return self._get_upload_bucket(
             True,
             identifier,
@@ -121,9 +157,15 @@ class UploadManager(object):
                 api, identifier, path, *args))
 
     def access_upload_bucket(self, identifier):
+        identifier = self._check_identifier(identifier)
+        if identifier is None:
+            raise InvalidIdentifierError()
         return self._get_upload_bucket(False, identifier, FileBucket)
 
     def clear_upload_bucket(self, identifier):
+        identifier = self._check_identifier(identifier)
+        if identifier is None:
+            raise InvalidIdentifierError()
         path = os.path.join(self._directory, identifier)
         with self._get_lock():
             if os.path.isdir(path):
@@ -171,7 +213,11 @@ class FileBucket(object):
 
     def clear(self):
         # This is called by the middleware if the upload fails.
-        self._api.clear_upload_bucket(self._identifier)
+        path = os.path.join(self._api._directory, self._identifier)
+        with self._api._get_lock():
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+
 
     def is_complete(self):
         status = self.get_status()
@@ -301,9 +347,11 @@ class UploadMiddleware(object):
     file upload progress.
     """
 
-    def __init__(self, application, directory, max_size=None, upload_url=None):
+    def __init__(self, application, directory, max_size=None,
+             upload_url=None, upload_key=None):
         self.application = application
-        self.manager = UploadManager(directory, upload_url=upload_url)
+        self.manager = UploadManager(
+            directory, upload_url=upload_url, upload_key=upload_key)
         self.max_size = max_size
 
     def __call__(self, environ, start_response):
@@ -315,7 +363,7 @@ class UploadMiddleware(object):
             if request.path_info.endswith('/upload'):
                 identifier = request.GET.get(IDENTIFIER_KEY)
 
-                if identifier is None or not VALID_ID.match(identifier):
+                if not self.manager.verify_identifier(identifier):
                     logger.error('Malformed upload identifier "%s"', identifier)
                     application = exc.HTTPServerError(
                         'Malformed upload identifier')
@@ -330,7 +378,7 @@ class UploadMiddleware(object):
             elif request.path_info.endswith('/upload/status'):
                 identifier = request.GET.get(IDENTIFIER_KEY)
 
-                if identifier is None or not VALID_ID.match(identifier):
+                if not self.manager.verify_identifier(identifier):
                     logger.error('Malformed upload identifier "%s"', identifier)
                     application = exc.HTTPServerError(
                         'Malformed upload identifier')
@@ -477,7 +525,7 @@ class UploadMiddleware(object):
 
 
 def make_filter(application, global_conf, directory,
-                max_size=0, upload_url=None):
+                max_size=0, upload_url=None, upload_key=None):
     """build a FileUpload application
     """
     directory = os.path.normpath(directory)
@@ -496,4 +544,5 @@ def make_filter(application, global_conf, directory,
         logger.info('Uploading to external URL: %s' % upload_url)
 
     return UploadMiddleware(
-        application, directory, max_size=max_size, upload_url=upload_url)
+        application, directory, max_size=max_size,
+        upload_url=upload_url, upload_key=upload_key)
