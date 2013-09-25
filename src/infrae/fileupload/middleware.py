@@ -184,8 +184,10 @@ class FileBucket(object):
         self._api = api
         self._status = None
 
-    def get_status(self):
-        if self._status is not None:
+    def get_status(self, refresh=False):
+        """Return the status of the upload.
+        """
+        if not refresh and self._status is not None:
             return self._status
         status = None
         with open(self._metadata, 'rb') as stream:
@@ -207,20 +209,23 @@ class FileBucket(object):
         return status
 
     def get_filename(self):
+        """Return the filename of the upload.
+        """
         if self.is_complete():
             return self._data
         return None
 
-    def clear(self):
+    def clear_upload(self):
         # This is called by the middleware if the upload fails.
         path = os.path.join(self._api._directory, self._identifier)
         with self._api._get_lock():
             if os.path.isdir(path):
                 shutil.rmtree(path)
 
-
     def is_complete(self):
-        status = self.get_status()
+        """Return true if the upload is done.
+        """
+        status = self.get_status(refresh=True)
         if status is not None:
             return status.get('state', 'unknown') == 'done'
         return False
@@ -239,7 +244,7 @@ def open_data(filename, payload=None):
     descriptor = open(filename, 'wb')
     if payload:
         descriptor.write(payload)
-    descriptor.flush()
+    descriptor.flush()          # Make sure the file is created on the FS
     return descriptor
 
 
@@ -250,6 +255,7 @@ class UploadFileBucket(FileBucket):
     def __init__(self, api, identifier, directory,
                  filename, content_type, content_length):
         super(UploadFileBucket, self).__init__(api, identifier, directory)
+        self._finished = False
         self._length = content_length
         self._metadata_descriptor = open_data(
             self._metadata,
@@ -261,16 +267,21 @@ class UploadFileBucket(FileBucket):
         self._done_descriptor = open_data(self._done, '0')
         self._data_descriptor = open_data(self._data)
 
-    def metadata(self, finished=False, error=None):
-        status = self.get_status()
-        if finished:
-            status['state'] = 'done'
+    def finish_upload(self, error=None):
+        if self._metadata_descriptor is None:
+            logger.error('Error while closing the upload (already closed).')
+            return
+        status = self.get_status(refresh=True)
         if error:
             status['state'] = 'error'
             status['error'] = error
+        elif self._finished:
+            status['state'] = 'done'
         self._metadata_descriptor.seek(0)
         self._metadata_descriptor.write(json.dumps(status))
         self._metadata_descriptor.flush()
+        self._metadata_descriptor.close()
+        self._metadata_descriptor = None
         self._status = None
 
     def progress(self):
@@ -280,12 +291,11 @@ class UploadFileBucket(FileBucket):
                 read = yield
             except GeneratorExit:
                 # Reload and save metadata.
-                self.metadata(finished=(total == self._length))
-                self._metadata_descriptor.close()
                 self._done_descriptor.close()
-                self._status = None
+                self._done_descriptor = None
                 raise StopIteration
             total += read
+            self._finished = total == self._length
             self._done_descriptor.seek(0)
             self._done_descriptor.write(str(total))
             self._done_descriptor.flush()
@@ -296,6 +306,7 @@ class UploadFileBucket(FileBucket):
                 block = yield
             except GeneratorExit:
                 self._data_descriptor.close()
+                self._data_descriptor = None
                 raise StopIteration
             if isinstance(block, str):
                 self._data_descriptor.write(block)
@@ -459,17 +470,18 @@ class UploadMiddleware(object):
             if upload is None:
                 upload = self.manager.create_upload_bucket(
                     identifier, '', 'n/a', '0')
-            upload.metadata(error=error.msg)
+            upload.finish_upload(error=error.msg)
+            return exc.HTTPServerError(error.msg)
+        else:
+            upload.finish_upload()
+        finally:
             if output_stream is not None:
                 output_stream.close()
             if track_progress is not None:
                 track_progress.close()
-            return exc.HTTPServerError(error.msg)
 
         # We are done uploading
-        output_stream.close()
-        track_progress.close()
-        logger.debug('%s: Upload done, file closed', identifier)
+        logger.debug('%s: Upload done, file closed.', identifier)
 
         # Get the response from the application
         info = json.dumps(upload.get_status())
@@ -486,7 +498,7 @@ class UploadMiddleware(object):
         try:
             upload = self.manager.access_upload_bucket(identifier)
             if upload is not None:
-                upload.clear()
+                upload.clear_upload()
         except UploadError:
             result = '{"success": false, "error": "Upload server error"}'
         else:
