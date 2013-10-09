@@ -462,6 +462,9 @@ class UploadMiddleware(object):
             while not compare(line, end_boundary):
                 output_stream.send(line)
                 line = input_stream.read()
+                if line is None:
+                    raise RequestError('Upload request is malformed '
+                                       '(missing end of upload marker)')
                 if compare(line, part_boundary):
                     # Multipart, we don't handle that
                     raise RequestError('Upload request is malformed '
