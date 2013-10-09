@@ -1,10 +1,10 @@
 Changes
 =======
 
-1.1 (unreleased)
-----------------
+1.0.1 (2013/10/09)
+------------------
 
-- ...
+- Support malformed requests that are not properly terminated.
 
 1.0 (2013/10/08)
 ----------------
