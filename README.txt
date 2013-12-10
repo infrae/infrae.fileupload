@@ -71,3 +71,10 @@ using ``egg:infrae.fileupload``. Configuration directives are:
     security preventing abuse of the upload middleware or
     application. If multiple processes and installations shares the
     same upload URL they should share the same upload key too.
+
+
+Code repository
+===============
+
+You can find the code of this extension in Git:
+https://github.com/infrae/infrae.fileupload
